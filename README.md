@@ -9,4 +9,4 @@ This series of [Google Earth Engine (GEE)](https://code.earthengine.google.com/)
 The main objectives of this series are to demonstrate how Earth Observations related to fire hotspots, burned areas, and vegetation and climate measurements can be used to visualize fire hotspots, map burned area, and create a simple fire risk map.
 
 ## Context
-These scripts were developed by the SERVIR Science Coordination Office in collaboration with the Asian Disaster Preparedness Center. Learner needs assessments and scoping were conducted by Aekkapol Aekakkararungroj. Code was written by [Kaitlin Walker](https://github.com/katieailsa) (NASA / UAH).
+These scripts were developed by the SERVIR Science Coordination Office in collaboration with the Asian Disaster Preparedness Center. Learner needs assessments and scoping were conducted by Aekkapol Aekakkararungroj. Code was written by [Kaitlin Walker](https://github.com/katieailsa) (NASA / UAH). Improvements are ongoing.
