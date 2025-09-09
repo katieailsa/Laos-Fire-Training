@@ -1,0 +1,24 @@
+// Module
+//---------- Use the MODIS FireMask band to exclude low confidence detections -------------------------------
+
+// Function to filter data using a QA band.
+// In this case, the QA band we're using is called 'FireMask'.
+var bitwiseExtract = function(input, fromBit, toBit) {
+  var maskSize = ee.Number(1).add(toBit).subtract(fromBit);
+  var mask = ee.Number(1).leftShift(maskSize).subtract(1);
+  return input.rightShift(fromBit).bitwiseAnd(mask);
+};
+
+// Get only Nominal and High confidence detections.
+var applyFireMask = function(img) {
+  var frp = img.select('MaxFRP');
+  var qa = img.select('FireMask');
+  var validDataMask = bitwiseExtract(qa, 0, 3).gte(8);
+  var mask = validDataMask;
+  return frp.updateMask(mask)
+    //.select('FireMask', 'MaxFRP', 'sample', 'QA')   //('.*')
+    .copyProperties(img, ['system:time_start']);
+};
+
+exports.applyFireMask = applyFireMask;
+

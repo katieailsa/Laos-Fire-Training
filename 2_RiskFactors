@@ -1,0 +1,539 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var modis_ndvi_m_1km = ee.ImageCollection("MODIS/061/MOD13A3"),
+    LST_d_1km = ee.ImageCollection("NOAA/VIIRS/001/VNP21A1D"),
+    dem_30m = ee.Image("NASA/NASADEM_HGT/001"),
+    dem_1km = ee.Image("USGS/GTOPO30"),
+    precip_m_1km = ee.ImageCollection("NASA/GPM_L3/IMERG_MONTHLY_V07"),
+    modisTerra_hot_d_1km = ee.ImageCollection("MODIS/061/MOD14A1"),
+    modisAqua_hot_d_1km = ee.ImageCollection("MODIS/061/MYD14A1"),
+    provinces = ee.FeatureCollection("projects/servir-sco-assets/assets/SCO_MKG/Laos_fire_training/Laos_provinces"),
+    geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[101.61214037007217, 20.66963142059504],
+          [101.61214037007217, 20.350644828816122],
+          [102.26033372944717, 20.350644828816122],
+          [102.26033372944717, 20.66963142059504]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// By Katie Walker, August 2024
+
+//=============================================================================================
+//                    EXPLORING FACTORS OF FIRE RISK: MULTICRITERIA ANALYSIS
+//=============================================================================================
+// Several dynamic factors of fire risk, including vegetation, precipitation, land surface 
+// temperature will be explored, as well as a static factor, elevation/slope. We will resample them 
+// in space and time, investigate the relationship between these factors and active fires, and 
+// create a very simple weighted risk map. A multi-criteria analysis does not yield predictions, but is 
+// helpful for understanding risk based on historical data, and is useful for integrating many types of 
+// data (climate, vegetation, terrain, and socioeconomic).
+//=============================================================================================
+
+//:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+//                      RUN FOR OUDOMXAI OR KHAMMOUAN PROVINCE (optional)
+ 
+// If you would like to run an example of mapping burn severity for either Oudomxai or Khammouan 
+// province, you can use the predefined geometry below. Choose one of the two provinces at a time.
+// --> Remove the comment-symbol (//) below  next to your choice of province so Earth Engine
+//     recognizes the polygon.
+
+// var geometry = provinces.filter(ee.Filter.eq('ADM1_EN', 'Oudomxai')).geometry();
+// var geometry = provinces.filter(ee.Filter.eq('ADM1_EN', 'Khammouan')).geometry();
+
+// Do not forget to delete/outcomment this geometry before creating a new one!
+//:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+//*******************************************************************************************
+//                             SELECT YOUR OWN STUDY AREA   
+
+// Use the polygon-tool in the top left corner of the map pane to draw the shape of your 
+// study area. Single clicks add vertices, double-clicking completes the polygon.
+// *Note: Under 'Geometry Imports' (top left in map pane) uncheck the 
+//                geometry box, so it does not block the view on the imagery later.
+
+//*******************************************************************************************
+//                                     SET TIME FRAME
+
+// Set start and end dates to base the risk map on. Try out different time frames.
+// These are inclusive (for example: a start of 2021 and end of 2021 includes all dates within 2021)
+// It's recommended to choose at least 2 months for this exercise.
+var start_year = 2021;  //these are inclusive
+var end_year = 2021;
+var start_month = 1;
+var end_month = 6;
+
+// Select a year for population density data. We need to select this separately because
+// it is not available for all years.
+//   Available years: 2000, 2005, 2010, 2015, or 2020.
+var pop_year = '2020';
+// add option to grab selected months from each year of the imagecollection? In case they wanna do just the burning season
+
+
+//*******************************************************************************************
+//                                 SET VARIABLE WEIGHTS 
+
+// Set weights (Make sure they add up to 1.0)
+var Wprecip = 0.3   // Precipitation
+var Wlst = 0.2      // Land Surface Temperature
+var Wndvi = 0.15    // NDVI
+var Wdem = 0.15     // Elevation
+var Wpop = 0.2      // Population
+
+
+// *Note: Output Risk maps for individual variables are scaled from 0 to 4, with 0
+//  being HIGHEST relative risk and 4 being LOWEST relative risk.
+
+//*******************************************************************************************
+//                                CHOOSE OUTPUT FILE NAMES
+
+// Choose file name for dNBR
+var outputRiskFile = 'Risk';
+// Choose file name for thresholded dNBR
+var outputClassFile = 'Classified_Risk';
+
+//*******************************************************************************************
+//---->>> DO NOT EDIT THE SCRIPT PAST THIS POINT (unless you have GEE experience) <<<---
+//------------------->>> NOW HIT 'RUN' AT THE TOP OF THE SCRIPT! <<<-------------------------
+
+
+// Location
+var area = ee.FeatureCollection(geometry);
+
+// Set study area as map center.
+Map.centerObject(area);
+
+
+//--------------------------- Import Independent Data and Preprocess -------------------------------
+
+///////////////////////////////////////////////////////////////////////////////////
+///////////////// Fire Hotspots (~1km, daily) /////////////////////////////////////
+var terra = ee.ImageCollection("MODIS/061/MOD14A1").select('FireMask','MaxFRP')
+  .filter(ee.Filter.calendarRange(start_year, end_year, 'year'))
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'));
+var aqua = ee.ImageCollection("MODIS/061/MYD14A1").select('FireMask','MaxFRP')
+  .filter(ee.Filter.calendarRange(start_year, end_year, 'year'))
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'));
+
+// Merge Terra and Aqua hotspots to include more overpass times
+var hotspots_all = ee.ImageCollection(terra.merge(aqua)).sort("system:time_start");
+
+// Clip imagery to area
+var hotspots = hotspots_all.map(function(image) { return image.clip(geometry).reproject('EPSG:4326', null, 1000); });
+
+// Use FireMask band to select only nominal and high confidence detections
+// Get  and use our fire masking module
+var mod_2a = require('users/kaw0055/laos_fire_training1:2a_Modis_FireMask_mod');
+var hotspots_masked = hotspots.map(mod_2a.applyFireMask).select('MaxFRP');
+
+// Display Hotspots on the map.
+var fire_viz = {min: 1, max: 10, palette: ['lightsalmon','red','darkred']}; // show range for number of times the same pixel has been detected
+Map.addLayer(hotspots_masked.count().clip(geometry), fire_viz, 'Hotspots Count (masked)'); // for plain color: use {palette: 'orange'} 
+//print('MODIS Hotspots (Terra + Aqua, masked)', hotspots_masked);
+
+
+// Aggregate daily images to monthly images: Get monthly sum
+var years = ee.List.sequence(start_year, end_year);
+var months = ee.List.sequence(start_month, end_month);
+
+var HotMonthlyMap = years.map(function(y) {
+  var yearCollection = hotspots_masked.filter(ee.Filter.calendarRange(y, y, 'year'));   //using the masked QC'ed imagery
+  var byYear = months.map(function (m){
+    var totalCount = yearCollection.filter(ee.Filter.calendarRange(m, m, 'month'))  // get all images in a month time period (there are multiple observations every day)
+      // Count the number of non-masked in the stack at each pixel
+      .count();  // Output: One image where each pixel is the number of unmasked pixels (hotspots) in the input stack.
+    
+    var date = ee.Date(
+      ee.String(ee.Number(y).format('%02d')).cat('-').cat(ee.Number(m).format('%02d')).cat('-').cat('01'));
+    return totalCount
+    // Add a date property
+    .set('system:time_start', date.millis())
+    .set('date', ee.Date(date));
+  });
+  return byYear.flatten();
+}).flatten();
+
+//Create an Image collection from the list.
+var hotspots_monthly = ee.ImageCollection(HotMonthlyMap);
+print('Monthly MODIS Hotspots (Aqua+Terra, masked)', hotspots_monthly);
+
+// Extract the MODIS projection so we can reproject other dataset to the MODIS projection.
+var projection = ee.Image(hotspots_masked.first()).projection();
+var projectionAt1k = projection.atScale(1000);
+
+
+///////////////////////////////////////////////////////////////////////////////////
+//////////////////// ELEVATION / SLOPE (1 km) /////////////////////////////////////
+// A digital elevation model.
+var dem = ee.Image('USGS/GTOPO30').select('elevation').clip(geometry);
+
+// Use the ee.Terrain.products function to calculate slope, aspect, and
+// hillshade simultaneously. The output bands are appended to the input image.
+//   Hillshade: based on illumination azimuth=270, elevation=45.
+//   Slope: Units are degrees, range is [0,90]
+//   Aspect: Units are degrees where 0=N, 90=E, 180=S, 270=W.
+var terrain = ee.Terrain.products(dem);
+
+// Display slope, aspect, and elevation layers on the map.
+Map.addLayer(terrain.select('slope'), {min: 0, max: 89.99}, 'Slope', false);
+Map.addLayer(terrain.select('aspect'), {min: 0, max: 359.99}, 'Aspect', false);
+Map.addLayer(dem, {min: -10.0, max: 8000.0, gamma: 1.6}, 'Elevation', false);
+
+print('Elevation', dem);
+
+
+////////////////////////////////////////////////////////////////////////////////////
+////////////// Land Surface Temperature (LST) (1 km, Daily) ////////////////////////
+// LST units: K
+var lst_all = ee.ImageCollection('NOAA/VIIRS/001/VNP21A1D').select('LST_1KM')
+  .filterBounds(geometry)
+  .filter(ee.Filter.calendarRange(start_year, end_year, 'year'))
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'));
+  
+// Aggregate daily images to monthly images: get monthly mean
+// Use .mean() to get mean monthly LST
+var years = ee.List.sequence(start_year, end_year);
+var months = ee.List.sequence(start_month, end_month);
+
+var LSTmonthlyMap = years.map(function(y) {
+  var yearCollection = lst_all.filter(ee.Filter.calendarRange(y, y, 'year'));   //using the masked QC'ed imagery
+  var byYear = months.map(function (m){
+    var monthlyMean = yearCollection.filter(ee.Filter.calendarRange(m, m, 'month'))  // get all images in a month time period (there are multiple observations every day)
+      // Take the average value across the stack for each month
+      .mean();  // Output: One image where each pixel is the number of unmasked pixels (hotspots) in the input stack.
+    
+    var date = ee.Date(
+      ee.String(ee.Number(y).format('%02d')).cat('-').cat(ee.Number(m).format('%02d')).cat('-').cat('01'));
+    return monthlyMean
+    // Add a date property
+     .set('system:time_start', date.millis())
+     .set('date', ee.Date(date))
+    // Request the data at the scale and projection of MODIS
+    .reproject({
+    crs: projectionAt1k,
+  }).clip(geometry);
+  });
+  return byYear.flatten();
+}).flatten();
+
+//Create an Image collection from the list.
+var lst = ee.ImageCollection(LSTmonthlyMap);
+print('Monthly Mean Land Surface Temperature', lst);
+
+
+// Display LST on the map.
+var lst_vis = {
+  bands: ['LST_1KM'],
+  min: [280],
+  max: [340],
+  palette: ['a50026','d73027','f46d43','fdae61','fee08b','ffffbf','d9ef8b','a6d96a','66bd63','1a9850','006837',]
+};
+Map.addLayer(lst, lst_vis, 'Land Surface Temperature', false);
+//print('Land Surface Temperature', lst_all);
+
+
+/////////////////////////////////////////////////////////////////////////////////
+//////////////// Precipitation (~11 km, Monthly) ////////////////////////////////
+var precip_all = ee.ImageCollection('NASA/GPM_L3/IMERG_MONTHLY_V07').select('precipitation')
+  .filter(ee.Filter.calendarRange(start_year, end_year, 'year'))
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'));
+  
+// Clip imagery to area, Reproject to MODIS scale
+var precip = precip_all.map(function(image) { 
+  return image
+  .set('date', image.date())
+  // Request the data at the scale and projection of MODIS
+  .reproject({
+    crs: projectionAt1k,
+  }).clip(geometry);
+});
+
+// Display Precip on the map.
+var precip_vis = {
+  min: 0.1, 
+  max: 0.6, 
+  palette: [
+  '000096','0064ff', '00b4ff', '33db80', '9beb4a','ffeb00'
+]};
+Map.addLayer(precip, precip_vis, 'Precipitation', false);
+
+print('Precipitation', precip);
+
+
+//////////////////////////////////////////////////////////////////////////////////
+////////////////////// NDVI (1km, Monthly) ///////////////////////////////////////
+var ndvi_all = ee.ImageCollection("MODIS/061/MOD13A3").select('NDVI')
+  .filter(ee.Filter.calendarRange(start_year, end_year, 'year'))
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'));
+
+// Clip imagery to area and reproject to MODIS scale
+var ndvi = ndvi_all.map(function(image) { 
+  return image
+  .set('date', image.date())
+  .reproject({
+     // Request the data at the scale and projection of MODIS
+    crs: projectionAt1k
+  }).clip(geometry);
+});
+
+// Display NDVI on the map.
+var ndvi_vis = {
+  min: 0,
+  max: 12000,
+  palette: ['ffffff', 'ce7e45', 'df923d', 'f1b555', 'fcd163', '99b718', '74a901',
+    '66a000', '529400', '3e8601', '207401', '056201', '004c00', '023b01','012e01', '011d01', '011301'
+  ]};
+Map.addLayer(ndvi, ndvi_vis, 'NDVI', false);
+
+print('NDVI', ndvi);
+
+
+///////////////////////////////////////////////////////////////////////////////////
+///////////// Population Density (~1km, 5-year intervals from 2000 to 2020) ///////
+var pop_all = ee.ImageCollection('CIESIN/GPWv411/GPW_Population_Density').select('population_density')
+  .filterDate(pop_year).first();
+
+// Clip imagery to area
+var pop = pop_all.clip(geometry);
+
+// Reproject to MODIS scale
+var pop = pop
+  .set('date', pop.date())
+  .reduceResolution({
+    reducer: ee.Reducer.sum().unweighted(),
+    maxPixels: 1024
+  })
+  // Request the data at the scale and projection of MODIS
+  .reproject({
+    crs: projectionAt1k
+  });
+
+// Display Population on the map.
+var pop_vis = {
+  'min': 10.0,
+  'max': 800.0,
+  'palette': ['ffffe7','FFc869','ffac1d','e17735','f2552c','9f0c21'
+  ]};
+
+Map.addLayer(pop, pop_vis, 'Population Density', false);
+
+print('Population Density', pop);
+
+
+
+//------------------- Get Classified Risk for each Variable ---------------------------------
+// 0: 100th percentile
+// 1: 90 - 100th percentile
+// 2: 70 - 90th percentile
+// 3: 50 - 70th percentile
+// 4: 0  - 50th percentile
+//////////////// Classify NDVI risk /////////////////////////////////////
+// Reduce image collection to get one mean or max image
+var ndvi_reduce = ndvi.mean();
+// Get percentiles for risk classes
+var ndvi_perc = ndvi_reduce.reduceRegion(ee.Reducer.percentile([50, 70, 90, 100]), geometry, 1000);
+//print('NDVI percentiles', ndvi_perc);
+
+var p50 = ee.Number(ndvi_perc.get("NDVI_p50"));
+var p70 = ee.Number(ndvi_perc.get("NDVI_p70"));
+var p90 = ee.Number(ndvi_perc.get("NDVI_p90"));
+var p100 = ee.Number(ndvi_perc.get("NDVI_p100"));
+
+// Separate result into 4 risk classes
+var thresholds = ee.Image([p50, p70, p90, p100]); //creates an image out of each list element and combines them into a single multi-band image
+var ndvi_class = ndvi_reduce.lt(thresholds).reduce('sum').toInt();  //  lt returns image with boolean bands.
+
+
+//////////////// Classify LST risk /////////////////////////////////////
+// Reduce image collection to get one mean or max image
+var lst_reduce = lst.mean();
+// Get percentiles for risk classes
+var lst_perc = lst_reduce.reduceRegion(ee.Reducer.percentile([50, 70, 90, 100]), geometry, 1000);
+//print('LST percentiles', lst_perc);
+
+var p50 = ee.Number(lst_perc.get("LST_1KM_p50"));
+var p70 = ee.Number(lst_perc.get("LST_1KM_p70"));
+var p90 = ee.Number(lst_perc.get("LST_1KM_p90"));
+var p100 = ee.Number(lst_perc.get("LST_1KM_p100"));
+
+// Separate result into 4 risk classes
+var thresholds = ee.Image([p50, p70, p90, p100]); //creates an image out of each list element and combines them into a single multi-band image
+var lst_class = lst_reduce.lt(thresholds).reduce('sum').toInt();  //  lt returns image with boolean bands.
+
+
+//////////////// Classify Precipitation risk /////////////////////////////////////
+// Reduce image collection to get one mean or max image
+var precip_reduce = precip.mean();
+// Get percentiles for risk classes
+var precip_perc = precip_reduce.reduceRegion(ee.Reducer.percentile([50, 70, 90, 100]), geometry, 1000);
+//print('Precipitation percentiles', precip_perc);
+
+var p50 = ee.Number(precip_perc.get("precipitation_p50"));
+var p70 = ee.Number(precip_perc.get("precipitation_p70"));
+var p90 = ee.Number(precip_perc.get("precipitation_p90"));
+var p100 = ee.Number(precip_perc.get("precipitation_p100"));
+
+// Separate result into 4 risk classes
+var thresholds = ee.Image([p50, p70, p90, p100]); //creates an image out of each list element and combines them into a single multi-band image
+var precip_class = precip_reduce.lt(thresholds).reduce('sum').toInt();  //  lt returns image with boolean bands.
+
+
+//////////////// Classify Elevation risk /////////////////////////////////////
+// We don't need to reduce the Elevation, as it is already just one image.
+// Get percentiles for risk classes
+var dem_perc = dem.reduceRegion(ee.Reducer.percentile([50, 70, 90, 100]), geometry, 1000);
+
+var p50 = ee.Number(dem_perc.get("elevation_p50"));
+var p70 = ee.Number(dem_perc.get("elevation_p70"));
+var p90 = ee.Number(dem_perc.get("elevation_p90"));
+var p100 = ee.Number(dem_perc.get("elevation_p100"));
+
+// Separate result into 4 risk classes
+var thresholds = ee.Image([p50, p70, p90, p100]); //creates an image out of each list element and combines them into a single multi-band image
+var dem_class_reverse = dem.lt(thresholds).reduce('sum').toInt();  //  lt returns image with boolean bands.
+var dem_class = dem_class_reverse.remap([1, 2, 3, 4],[4, 3, 2, 1]); // Use the reverse order since increasing elevation means decreasing risk
+
+//////////////// Classify Population risk /////////////////////////////////////
+// We don't need to reduce the Elevation, as it is already just one image.
+// Get percentiles for risk classes
+var pop_perc = pop.reduceRegion(ee.Reducer.percentile([50, 70, 90, 100]), geometry, 1000);
+
+var p50 = ee.Number(pop_perc.get("population_density_p50"));
+var p70 = ee.Number(pop_perc.get("population_density_p70"));
+var p90 = ee.Number(pop_perc.get("population_density_p90"));
+var p100 = ee.Number(pop_perc.get("population_density_p100"));
+
+// Separate result into 4 risk classes
+var thresholds = ee.Image([p50, p70, p90, p100]); //creates an image out of each list element and combines them into a single multi-band image
+var pop_class = pop.lt(thresholds).reduce('sum').toInt();  //  lt returns image with boolean bands.
+
+/////////// Visualize Variable Risks //////////////////////
+// Mapping variable risks
+var risk_vis = {
+  min: 0,
+  max: 4,
+  palette: ['ff2dbf', 'ef4848', 'e8c836', '51e78e', '18cae6'
+  ]};
+
+Map.addLayer(ndvi_class, risk_vis, 'NDVI Risk Classes', false);
+Map.addLayer(lst_class, risk_vis, 'LST Risk Classes', false);
+Map.addLayer(precip_class, risk_vis, 'Precip Risk Classes', false);
+Map.addLayer(dem_class, risk_vis, 'Elevation Risk Classes', false);
+Map.addLayer(pop_class, risk_vis, 'Population Risk Classes', false);
+
+
+//----------------------------- Calculate Total Weighted Risk ---------------------------------------
+// Use weights set by the user.
+
+var image = ee.Image.cat(precip_class, lst_class, ndvi_class, dem_class, pop_class);
+//print('Combined image', image);
+
+// Define an expression
+// Compute the Risk using an expression: sum the weighted data.
+var risk = image.expression(
+    '(Wprecip * precip) + (Wlst * lst) + (Wndvi * ndvi) + (Wdem * dem) + (Wpop * pop)',{
+      'precip': image.select('sum'),
+      'lst': image.select('sum_1'),
+      'ndvi': image.select('sum_2'),
+      'dem': image.select('remapped'),
+      'pop': image.select('sum_3'),
+      'Wprecip': Wprecip,
+      'Wlst': Wlst,
+      'Wndvi': Wndvi,
+      'Wdem': Wdem,
+      'Wpop': Wpop,
+});
+
+// Display weighted risk
+Map.addLayer(risk, risk_vis, 'Weighted Risk');
+
+
+//////////////// Classify Weighted risk /////////////////////////////////////
+// Get percentiles for risk classes: We will use sightly different percentiles for
+// the final weighted classes, where the highest risk is in the lowest 10% of values.
+var risk_perc = risk.reduceRegion(ee.Reducer.percentile([10, 20, 30, 50]), geometry, 1000);
+
+var class1 = ee.Number(risk_perc.get("constant_p10"));
+var class2 = ee.Number(risk_perc.get("constant_p20"));
+var class3 = ee.Number(risk_perc.get("constant_p30"));
+var class4 = ee.Number(risk_perc.get("constant_p50"));
+
+// Separate result into 4 risk classes
+var thresholds = ee.Image([class1, class2, class3, class4]); //creates an image out of each list element and combines them into a single multi-band image
+var risk_class_reversed = risk.lt(thresholds).reduce('sum').toInt();  //  lt returns image with boolean bands.
+var risk_class = risk_class_reversed.remap([0, 1, 2, 3, 4],[4, 3, 2, 1, 0]);
+
+// Visualize Weighted Risk
+var risk_vis_reversed = {
+  min: 0,
+  max: 4,
+  palette: ['18cae6', '51e78e', 'e8c836', '51e78e', 'ff2dbf'
+  ]}; 
+Map.addLayer(risk_class, risk_vis, 'Classified Weighted Risk', false);
+
+
+
+//---------------------- Export Image to Drive  --------------------------------
+// Downloads will be available in the 'Tasks'-tab on the right.
+Export.image.toDrive({
+  image: risk, 
+  scale: 1000, 
+  description: outputRiskFile, 
+  fileNamePrefix: outputRiskFile,
+  region: area, maxPixels: 1e10});
+
+Export.image.toDrive({
+  image: risk_class, 
+  scale: 1000, 
+  description: outputClassFile, 
+  fileNamePrefix: outputClassFile,
+  region: area, maxPixels: 1e10});
+
+
+
+//---------------------- EXTRA: Calculate Counts of Monthly Hotspots --------------------------------
+
+// Calculate the total number of times a hotspot was detected ONE OR MORE times for each month.
+//     This solves the problem of double-counting hotspots detected by both Terra and Aqua. 
+//     However, it reduces the total hotspot count for each month.
+
+// Get Monthly hotspot counts (burn days): map over years and months
+var years = ee.List.sequence(start_year, end_year);
+var months = ee.List.sequence(start_month, end_month);
+
+var monthlyCount = years.map(function(y) {
+  var yearCollection = hotspots_masked.filter(ee.Filter.calendarRange(y, y, 'year'));   //using the masked QC'ed imagery
+  var byYear = months.map(function (m){
+    var totalCount = yearCollection.filter(ee.Filter.calendarRange(m, m, 'month'))  // get all images in a month time period (there are multiple observations every day)
+      // Count the number of non-masked in the stack at each pixel
+      .count();  // Output: One image where each pixel is the number of unmasked pixels (hotspots) in the input stack.
+    
+    // Sum up all the hotspot pixel counts for each month for the geometry
+    var getBurnCount = totalCount.updateMask(totalCount.gte(1)) // Update mask: keep all counts at or above 1
+    .reduceRegion({
+        reducer: ee.Reducer.sum().unweighted(),   // Get region-wide sum of the pixel counts, unweighted. 
+        geometry: geometry,
+        scale: projection.nominalScale(),              // This is the scale of the hotspot data product
+        maxPixels: 1e13
+      });  
+   // reduceRegion() returns a dictionary with the sum of unmasked pixels for each month for the geometry
+   
+    var countValue = ee.Dictionary(getBurnCount).get('MaxFRP'); // get value associated with dictionary key
+    
+    var f = ee.Feature(null, {  //originally ee.Feature(null, {})
+      'year': y,
+      'month': m,
+      'hotspot_count': countValue
+    });
+    return f;
+  });
+  return byYear.flatten();
+}).flatten();
+
+
+// Print to see output
+print("Hotspots monthly Count", monthlyCount);

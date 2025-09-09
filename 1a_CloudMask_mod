@@ -1,0 +1,61 @@
+// Module
+//------------------------------- Apply a cloud and snow mask -------------------------------
+
+// Function to mask clouds from the pixel quality band of Sentinel-2 SR data.
+function maskS2sr(image) {
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = ee.Number(2).pow(10).int();
+  var cirrusBitMask = ee.Number(2).pow(11).int();
+  // Get the pixel QA band.
+  var qa = image.select('QA60');
+  // All flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  // Return the masked image, scaled to TOA reflectance, without the QA bands.
+  return image.updateMask(mask)
+      .copyProperties(image, ["system:time_start"]);
+}
+
+// Function to mask clouds from the pixel quality band of Landsat 8 SR data.
+function maskL8sr(image) {
+  // Bits 3 and 4 are cloud shadow and snow, respectively. (eq(0))
+  // Bit 6 is for clear conditions, indicating non-cloudy pixels (neq(0))
+  var cloudShadowBitMask = 1 << 4;
+  var snowBitMask = 1 << 5;
+  var clearBitMask = 1 << 6;
+  // Get the pixel QA band.
+  var qa = image.select('QA_PIXEL');
+  // All flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+      .and(qa.bitwiseAnd(snowBitMask).eq(0))
+      .and(qa.bitwiseAnd(clearBitMask).neq(0));
+  // Return the masked image, scaled to TOA reflectance, without the QA bands.
+  return image.updateMask(mask)
+      .select("SR_B.")
+      .copyProperties(image, ["system:time_start"]);
+}
+
+// Function to do a QA filter for MODIS Burned Areas product.
+//Create a QA bitmask (see https://spatialthoughts.com/2021/08/19/qa-bands-bitmasks-gee/)
+var bitwiseExtract = function(input, fromBit, toBit) {
+  var maskSize = ee.Number(1).add(toBit).subtract(fromBit);
+  var mask = ee.Number(1).leftShift(maskSize).subtract(1);
+  return input.rightShift(fromBit).bitwiseAnd(mask);
+};
+
+var maskMODIS = function(img) {
+  var BurnDate = img.select('BurnDate');
+  var qa = img.select('QA');
+  var validDataMask = bitwiseExtract(qa, 1, 1).eq(1);
+  var landWaterMask = bitwiseExtract(qa, 0, 0).eq(1);
+  var mask = validDataMask.and(landWaterMask);
+  return BurnDate.updateMask(mask)
+    .select('B.*')
+    .copyProperties(img, ['system:time_start']);
+};
+
+
+exports.maskS2sr = maskS2sr;
+exports.maskL8sr = maskL8sr;
+exports.maskMODIS = maskMODIS;
+

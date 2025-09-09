@@ -1,0 +1,13 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var provinces = ee.FeatureCollection("projects/servir-sco-assets/assets/SCO_MKG/Laos_fire_training/Laos_provinces");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+var terra = ee.ImageCollection("MODIS/061/MOD14A1").filterDate('2022-01-01', '2022-12-31').filterBounds(provinces.select('Oudamxai'));
+
+// Get  and use our fire masking module
+var mask = require('users/kaw0055/laos_fire_training1:2a_Modis_FireMask_mod');
+var hotspots_masked = terra.map(mask.applyFireMask).select('MaxFRP');
+
+// Display Hotspots on the map.
+var fire_viz = {min: 100, max: 1000, palette: ['lightsalmon','red','darkred']}; // show range for number of times the same pixel has been detected
+Map.addLayer(hotspots_masked, fire_viz, 'Hotspots Count (masked)');
+
